@@ -11,7 +11,13 @@
 
     只使用 Windows 內建的 PowerShell 5.1、Outlook 與 Word，不需安裝任何軟體。
     執行方式：雙擊 MailSorter.bat
+              ArchiveSelected.bat：不開管理介面，直接歸檔 Outlook 中目前選取的信件
 #>
+param(
+    [switch]$ProcessSelected,   # 直接處理 Outlook 中選取的信件（不開管理介面）
+    [switch]$Preview,           # 搭配 -ProcessSelected：只預覽、不存檔
+    [switch]$Force              # 搭配 -ProcessSelected：已歸檔（有類別）的信件也重新處理
+)
 
 # ---------------------------------------------------------------------------
 # 環境檢查（受限語言模式下無法呼叫 Outlook / Word，也無法建立視窗）
@@ -115,7 +121,12 @@ $PlaceholderHelp = '可用代碼：{寄件者} {寄件者信箱} {寄件網域} 
 # 共用函式
 # ---------------------------------------------------------------------------
 function Show-Msg([string]$Text, [string]$Icon = 'Information') {
-    [void][System.Windows.Forms.MessageBox]::Show($Text, $AppName, 'OK', $Icon)
+    if ($script:headless) {
+        # 沒有主視窗時，讓訊息顯示在最上層（避免被 Outlook 視窗蓋住）
+        [void][System.Windows.Forms.MessageBox]::Show($Text, $AppName, 'OK', $Icon, 'Button1', 'DefaultDesktopOnly')
+    } else {
+        [void][System.Windows.Forms.MessageBox]::Show($Text, $AppName, 'OK', $Icon)
+    }
 }
 
 function Confirm-Msg([string]$Text) {
@@ -722,6 +733,9 @@ $script:loadingSrc  = $false
 $script:folderList  = New-Object System.Collections.ArrayList
 $script:ruleSrcIds  = @('')
 $script:cancel      = $false
+$script:headless    = [bool]$ProcessSelected
+$script:headlessResults = New-Object System.Collections.ArrayList
+$script:singleRuleIds = @()
 $script:running     = $false
 
 # ---------------------------------------------------------------------------
@@ -1210,11 +1224,53 @@ $btnRun     = Add-Ctl $tabRun (New-Btn '▶ 開始歸檔') 185 15 140
 $btnStop    = Add-Ctl $tabRun (New-Btn '■ 停止') 335 15 90
 $btnStop.Enabled = $false
 $btnOpenLog = Add-Ctl $tabRun (New-Btn '開啟處理紀錄資料夾') 880 15 170 0 'Top,Right'
-[void](Add-Ctl $tabRun (New-Lbl '預覽使用「目前編輯中（含未儲存）」的規則；正式歸檔使用「已儲存」的規則。每次正式歸檔的結果會存在 logs 資料夾（CSV）。' -Hint) 15 52)
-$progress = Add-Ctl $tabRun (New-Object System.Windows.Forms.ProgressBar) 15 75 1040 18 'Top,Left,Right'
-$lvResult = Add-Ctl $tabRun (New-ListView @('結果', '收件時間', '寄件者', '主旨', '規則', '目的地 / 說明') @(70, 120, 160, 260, 140, 400)) 15 100 1040 520 'Top,Bottom,Left,Right'
+[void](Add-Ctl $tabRun (New-Lbl '↑ 處理「1. 資料來源」中所有啟用的資料夾。' -Hint) 435 22)
+
+$grpSingle = Add-Ctl $tabRun (New-Object System.Windows.Forms.GroupBox) 15 52 1040 92 'Top,Left,Right'
+$grpSingle.Text = '單一信件（只處理指定的信件）'
+[void](Add-Ctl $grpSingle (New-Lbl '套用方式：') 12 27)
+$cboSingleMode = Add-Ctl $grpSingle (New-Combo) 85 23 330
+$chkSinglePreview = Add-Ctl $grpSingle (New-Chk '只預覽') 430 26
+$chkSingleRedo = Add-Ctl $grpSingle (New-Chk '已歸檔過的信件也重新處理') 510 26
+$btnSelMail = Add-Ctl $grpSingle (New-Btn '處理 Outlook 選取的信件') 720 21 170
+$btnMsgFile = Add-Ctl $grpSingle (New-Btn '開啟 .msg 檔處理…') 896 21 132
+[void](Add-Ctl $grpSingle (New-Lbl '先在 Outlook 選取一封或多封信件（或開啟信件視窗）再按按鈕。「套用規則：…」直接使用該規則的路徑與輸出設定，不檢查條件。' -Hint) 12 60)
+
+[void](Add-Ctl $tabRun (New-Lbl '預覽使用「目前編輯中（含未儲存）」的規則；正式歸檔使用「已儲存」的規則。每次正式歸檔的結果會存在 logs 資料夾（CSV）。' -Hint) 15 152)
+$progress = Add-Ctl $tabRun (New-Object System.Windows.Forms.ProgressBar) 15 172 1040 18 'Top,Left,Right'
+$lvResult = Add-Ctl $tabRun (New-ListView @('結果', '收件時間', '寄件者', '主旨', '規則', '目的地 / 說明') @(70, 120, 160, 260, 140, 400)) 15 196 1040 424 'Top,Bottom,Left,Right'
+
+function Update-SingleModeCombo {
+    $prev = $cboSingleMode.SelectedIndex
+    $prevId = ''
+    if ($prev -ge 2 -and ($prev - 2) -lt $script:singleRuleIds.Count) { $prevId = $script:singleRuleIds[$prev - 2] }
+    $cboSingleMode.Items.Clear()
+    [void]$cboSingleMode.Items.Add('依規則自動比對')
+    [void]$cboSingleMode.Items.Add('手動選擇存放目錄…（存 PDF、MSG、附件）')
+    $ids = @()
+    $src = $script:savedRules
+    if ($chkSinglePreview.Checked) { $src = $script:workRules }
+    foreach ($r in $src) {
+        $t = '套用規則：' + $r.Name
+        if (-not $r.Enabled) { $t += '（停用中）' }
+        [void]$cboSingleMode.Items.Add($t)
+        $ids += $r.Id
+    }
+    $script:singleRuleIds = $ids
+    $idx = 0
+    if ($prev -eq 1) { $idx = 1 }
+    elseif ($prevId) { $k = [array]::IndexOf($ids, $prevId); if ($k -ge 0) { $idx = $k + 2 } }
+    $cboSingleMode.SelectedIndex = $idx
+}
 
 function Add-Result([string]$State, $Info, [string]$RuleName, [string]$Detail) {
+    if ($script:headless) {
+        $subj = ''; if ($Info) { $subj = $Info.Subject }
+        $line = "[$State] $subj"
+        if ($RuleName) { $line += "（$RuleName）" }
+        [void]$script:headlessResults.Add("$line`n      $Detail")
+        return
+    }
     $it = New-Object System.Windows.Forms.ListViewItem($State)
     $time = ''; $sender = ''; $subject = ''
     if ($Info) { $time = $Info.Received.ToString('yyyy-MM-dd HH:mm'); $sender = $Info.SenderName; $subject = $Info.Subject }
@@ -1234,31 +1290,140 @@ function Set-Running([bool]$Running) {
     $btnPreview.Enabled = -not $Running
     $btnRun.Enabled = -not $Running
     $btnStop.Enabled = $Running
+    $grpSingle.Enabled = -not $Running
     foreach ($p in @($tabSrc, $tabRule, $tabOpt, $tabHist)) { $p.Enabled = -not $Running }
 }
 
-function Invoke-Processing([bool]$DryRun) {
-    $sources = @($script:config.Sources | Where-Object { $_.Enabled })
-    if ($sources.Count -eq 0) { Show-Msg '尚未設定（或未啟用）任何資料來源，請先到「1. 資料來源」加入 Outlook 資料夾。' 'Warning'; return }
+# 取得本次要使用的規則：預覽用「編輯中」的規則，正式歸檔用「已儲存」的規則。回傳 $null 表示取消。
+function Get-RulesForRun([bool]$DryRun) {
     if ($DryRun) { $rules = $script:workRules }
     else {
-        if ($script:dirty) {
+        if ($script:dirty -and -not $script:headless) {
             if (Confirm-Msg '規則有未儲存的變更。是否先儲存規則再開始歸檔？（選「否」則以上次儲存的規則執行）') {
-                if (-not (Save-Rules '儲存規則（歸檔前）' '')) { if ($script:dirty) { return } }
+                if (-not (Save-Rules '儲存規則（歸檔前）' '')) { if ($script:dirty) { return $null } }
             }
         }
         $rules = $script:savedRules
     }
     $errors = @(Test-RulesValid $rules)
-    if ($errors.Count) { Show-Msg ("規則有誤：`n`n" + ($errors -join "`n")) 'Warning'; return }
+    if ($errors.Count) { Show-Msg ("規則有誤：`n`n" + ($errors -join "`n")) 'Warning'; return $null }
+    return , $rules
+}
+
+function New-RunContext([bool]$DryRun) {
+    $mode = '預覽'; if (-not $DryRun) { $mode = '歸檔' }
+    $rows = New-Object System.Collections.ArrayList
+    return [pscustomobject]@{
+        DryRun          = $DryRun
+        Mode            = $mode
+        RunTime         = (Get-Date)
+        LogRows         = $rows
+        Stat            = @{ Done = 0; Skip = 0; NoMatch = 0; Error = 0; Total = 0 }
+        SkipCategorized = [bool]$script:config.Options.SkipCategorized
+        ShowSkipped     = $false     # 是否在結果清單列出「已歸檔而略過」的信件
+        ForceRule       = $null      # 指定套用的規則（不比對條件）
+    }
+}
+
+# 處理一封信件（資料夾批次與單一信件共用）
+function Invoke-OneMail($Mail, [string]$SourceId, [string]$FolderLabel, $Rules, $Ctx, [bool]$AllowUpdate = $true) {
+    $opt = $script:config.Options
+    $Ctx.Stat.Total++
+    $info = $null
+    try {
+        $info = Get-MailInfo $Mail
+        if ($Ctx.SkipCategorized -and $opt.CategoryName) {
+            $cats = @($info.Categories -split '\s*[,;，]\s*')
+            if ($cats -contains $opt.CategoryName) {
+                $Ctx.Stat.Skip++
+                if ($Ctx.ShowSkipped) { Add-Result '略過' $info '' ("已有類別「{0}」（已歸檔過）" -f $opt.CategoryName) }
+                return
+            }
+        }
+
+        if ($Ctx.ForceRule) {
+            $matched = @($Ctx.ForceRule)
+        } else {
+            $matched = @()
+            foreach ($r in $Rules) {
+                if (Test-Rule $r $info $SourceId) { $matched += $r; if ($r.StopProcessing) { break } }
+            }
+            if ($matched.Count -eq 0) {
+                if ($opt.DefaultTargetPath) {
+                    $d = [pscustomobject]$RuleDefaults
+                    $d.Name = '(未符合規則－預設目錄)'; $d.TargetPath = $opt.DefaultTargetPath
+                    $matched = @($d)
+                } else {
+                    $why = '沒有符合的規則'
+                    if (-not $SourceId) { $why += '（此信件不在任何資料來源內，「限定來源」的規則不會套用）' }
+                    Add-Result '未符合' $info '' $why
+                    $Ctx.Stat.NoMatch++
+                    return
+                }
+            }
+        }
+
+        $anyOk = $false
+        foreach ($r in $matched) {
+            $dir = Expand-Template $r.TargetPath $info $r.Name -IsPath
+            if ($Ctx.DryRun) {
+                $file = Expand-Template $opt.FileNameTemplate $info $r.Name
+                $note = ''
+                if (-not [System.IO.Directory]::Exists($dir)) {
+                    if ($r.CreateFolder) { $note = '（將建立新目錄）' } else { $note = '（目錄不存在，將略過）' }
+                }
+                Add-Result '預覽' $info $r.Name ("$dir\$file $note")
+                $Ctx.Stat.Done++
+                continue
+            }
+            try {
+                $detail = Save-Mail $info $r $dir
+                Add-Result '完成' $info $r.Name ("$dir  ｜  $detail")
+                [void]$Ctx.LogRows.Add((New-LogRow $Ctx.RunTime $Ctx.Mode $FolderLabel $info $r.Name $dir '完成' $detail))
+                $Ctx.Stat.Done++; $anyOk = $true
+            } catch {
+                $state = '錯誤'
+                if ($_.Exception.Message -like '目錄不存在*') { $state = '略過'; $Ctx.Stat.Skip++ } else { $Ctx.Stat.Error++ }
+                Add-Result $state $info $r.Name $_.Exception.Message
+                [void]$Ctx.LogRows.Add((New-LogRow $Ctx.RunTime $Ctx.Mode $FolderLabel $info $r.Name $dir $state $_.Exception.Message))
+            }
+        }
+        if ($anyOk -and $AllowUpdate) { try { Complete-Mail $info } catch { } }
+    } catch {
+        $Ctx.Stat.Error++
+        Add-Result '錯誤' $info '' $_.Exception.Message
+        if ($info) { [void]$Ctx.LogRows.Add((New-LogRow $Ctx.RunTime $Ctx.Mode $FolderLabel $info '' '' '錯誤' $_.Exception.Message)) }
+    }
+}
+
+# 結束一次執行：關閉 Word、寫入處理紀錄，回傳摘要文字
+function Complete-Run($Ctx) {
+    Close-Office
+    if ($Ctx.LogRows.Count -gt 0) {
+        try {
+            if (-not (Test-Path -LiteralPath $LogDir)) { [void][System.IO.Directory]::CreateDirectory($LogDir) }
+            $logFile = Join-Path $LogDir ('處理紀錄_{0}.csv' -f $Ctx.RunTime.ToString('yyyyMMdd'))
+            $Ctx.LogRows | Export-Csv -LiteralPath $logFile -Append -NoTypeInformation -Encoding UTF8
+        } catch { Show-Msg ('處理紀錄寫入失敗：' + $_.Exception.Message) 'Warning' }
+    }
+    $st = $Ctx.Stat
+    $verb = '已歸檔'; if ($Ctx.DryRun) { $verb = '預計存放' }
+    $msg = "{0}完成：共檢查 {1} 封；{2} {3} 筆、略過 {4} 封、未符合 {5} 封、錯誤 {6} 筆" -f $Ctx.Mode, $st.Total, $verb, $st.Done, $st.Skip, $st.NoMatch, $st.Error
+    if ($script:cancel) { $msg = '（已手動停止）' + $msg }
+    Set-Status $msg
+    return $msg
+}
+
+function Invoke-Processing([bool]$DryRun) {
+    $sources = @($script:config.Sources | Where-Object { $_.Enabled })
+    if ($sources.Count -eq 0) { Show-Msg '尚未設定（或未啟用）任何資料來源，請先到「1. 資料來源」加入 Outlook 資料夾。' 'Warning'; return }
+    $rules = Get-RulesForRun $DryRun
+    if ($null -eq $rules) { return }
 
     $opt = $script:config.Options
     $cutoff = [datetime]::MinValue
     if ([int]$opt.DaysBack -gt 0) { $cutoff = (Get-Date).Date.AddDays(-[int]$opt.DaysBack) }
-    $runTime = Get-Date
-    $logRows = New-Object System.Collections.ArrayList
-    $stat = @{ Done = 0; Skip = 0; NoMatch = 0; Error = 0; Total = 0 }
-    $mode = '預覽'; if (-not $DryRun) { $mode = '歸檔' }
+    $ctx = New-RunContext $DryRun
 
     $lvResult.Items.Clear()
     $script:cancel = $false
@@ -1267,7 +1432,7 @@ function Invoke-Processing([bool]$DryRun) {
         foreach ($src in $sources) {
             if ($script:cancel) { break }
             try { $root = Get-MailFolder $src }
-            catch { Add-Result '錯誤' $null '' ('找不到資料夾：' + (Format-FolderPath $src.FolderPath)); $stat.Error++; continue }
+            catch { Add-Result '錯誤' $null '' ('找不到資料夾：' + (Format-FolderPath $src.FolderPath)); $ctx.Stat.Error++; continue }
 
             foreach ($folder in (Get-FolderTree $root ([bool]$src.IncludeSubfolders))) {
                 if ($script:cancel) { break }
@@ -1296,79 +1461,138 @@ function Invoke-Processing([bool]$DryRun) {
                     $n++
                     $progress.Value = [Math]::Min($n, $progress.Maximum)
                     Set-Status ("{0}：{1} / {2}" -f $fpath, $n, $mails.Count)
-                    $stat.Total++
-                    $info = $null
-                    try {
-                        $info = Get-MailInfo $m
-                        if ($opt.SkipCategorized -and $opt.CategoryName) {
-                            $cats = @($info.Categories -split '\s*[,;，]\s*')
-                            if ($cats -contains $opt.CategoryName) { $stat.Skip++; continue }
-                        }
-
-                        $matched = @()
-                        foreach ($r in $rules) {
-                            if (Test-Rule $r $info $src.Id) { $matched += $r; if ($r.StopProcessing) { break } }
-                        }
-                        if ($matched.Count -eq 0) {
-                            if ($opt.DefaultTargetPath) {
-                                $d = [pscustomobject]$RuleDefaults
-                                $d.Name = '(未符合規則－預設目錄)'; $d.TargetPath = $opt.DefaultTargetPath
-                                $matched = @($d)
-                            } else {
-                                Add-Result '未符合' $info '' '沒有符合的規則'
-                                $stat.NoMatch++
-                                continue
-                            }
-                        }
-
-                        $anyOk = $false
-                        foreach ($r in $matched) {
-                            $dir = Expand-Template $r.TargetPath $info $r.Name -IsPath
-                            if ($DryRun) {
-                                $file = Expand-Template $opt.FileNameTemplate $info $r.Name
-                                $note = ''
-                                if (-not [System.IO.Directory]::Exists($dir)) {
-                                    if ($r.CreateFolder) { $note = '（將建立新目錄）' } else { $note = '（目錄不存在，將略過）' }
-                                }
-                                Add-Result '預覽' $info $r.Name ("$dir\$file $note")
-                                $stat.Done++
-                                continue
-                            }
-                            try {
-                                $detail = Save-Mail $info $r $dir
-                                Add-Result '完成' $info $r.Name ("$dir  ｜  $detail")
-                                [void]$logRows.Add((New-LogRow $runTime $mode $fpath $info $r.Name $dir '完成' $detail))
-                                $stat.Done++; $anyOk = $true
-                            } catch {
-                                $state = '錯誤'
-                                if ($_.Exception.Message -like '目錄不存在*') { $state = '略過'; $stat.Skip++ } else { $stat.Error++ }
-                                Add-Result $state $info $r.Name $_.Exception.Message
-                                [void]$logRows.Add((New-LogRow $runTime $mode $fpath $info $r.Name $dir $state $_.Exception.Message))
-                            }
-                        }
-                        if ($anyOk) { try { Complete-Mail $info } catch { } }
-                    } catch {
-                        $stat.Error++
-                        Add-Result '錯誤' $info '' $_.Exception.Message
-                        if ($info) { [void]$logRows.Add((New-LogRow $runTime $mode $fpath $info '' '' '錯誤' $_.Exception.Message)) }
-                    }
+                    Invoke-OneMail $m $src.Id $fpath $rules $ctx $true
                 }
             }
         }
     } finally {
-        Close-Office
         Set-Running $false
-        if ($logRows.Count -gt 0) {
-            try {
-                if (-not (Test-Path -LiteralPath $LogDir)) { [void][System.IO.Directory]::CreateDirectory($LogDir) }
-                $logFile = Join-Path $LogDir ('處理紀錄_{0}.csv' -f $runTime.ToString('yyyyMMdd'))
-                $logRows | Export-Csv -LiteralPath $logFile -Append -NoTypeInformation -Encoding UTF8
-            } catch { Show-Msg ('處理紀錄寫入失敗：' + $_.Exception.Message) 'Warning' }
-        }
+        $msg = Complete-Run $ctx
     }
-    $msg = "{0}完成：共檢查 {1} 封；{2} {3} 筆、略過 {4} 封、未符合 {5} 封、錯誤 {6} 筆" -f $mode, $stat.Total, $(if ($DryRun) { '預計存放' } else { '已歸檔' }), $stat.Done, $stat.Skip, $stat.NoMatch, $stat.Error
-    if ($script:cancel) { $msg = '（已手動停止）' + $msg }
-    Set-Status $msg
+    Show-Msg $msg
+}
+
+# ---------------------------------------------------------------------------
+# 單一信件
+# ---------------------------------------------------------------------------
+
+# 找出信件所在資料夾屬於哪個資料來源（含「包含子資料夾」的上層來源），找不到回傳空字串
+function Get-SourceIdForFolder($Folder) {
+    $f = $Folder
+    for ($depth = 0; $depth -lt 20 -and $f; $depth++) {
+        try { $eid = [string]$f.EntryID; $path = [string]$f.FolderPath } catch { break }
+        foreach ($s in $script:config.Sources) {
+            if (($s.EntryID -eq $eid -or $s.FolderPath -eq $path) -and ($depth -eq 0 -or $s.IncludeSubfolders)) { return [string]$s.Id }
+        }
+        try { $f = $f.Parent; if ($f.Class -ne 2) { break } } catch { break }   # 2 = olFolder
+    }
+    return ''
+}
+
+function New-SingleItem($Mail, [bool]$FromFile, [string]$FilePath = '') {
+    $srcId = ''; $label = $FilePath
+    if (-not $FromFile) {
+        try { $srcId = Get-SourceIdForFolder $Mail.Parent; $label = Format-FolderPath ([string]$Mail.Parent.FolderPath) } catch { }
+    }
+    return [pscustomobject]@{ Mail = $Mail; SourceId = $srcId; Label = $label; FromFile = $FromFile }
+}
+
+# Outlook 目前選取的信件；若最上層是已開啟的信件視窗，則取該封信件
+function Get-OutlookSelection {
+    [void](Connect-Outlook)
+    $list = New-Object System.Collections.ArrayList
+    $win = $null
+    try { $win = $script:outlook.ActiveWindow() } catch { }
+    if ($win -and $win.Class -eq 35) {                 # 35 = olInspector（開啟中的信件視窗）
+        $it = $win.CurrentItem
+        if ($it.Class -eq $olMailClass) { [void]$list.Add((New-SingleItem $it $false)) }
+        return , $list
+    }
+    $exp = $null
+    try { $exp = $script:outlook.ActiveExplorer() } catch { }
+    if (-not $exp) { throw '找不到開啟中的 Outlook 視窗，請先開啟 Outlook 並選取信件。' }
+    $sel = $exp.Selection
+    for ($i = 1; $i -le $sel.Count; $i++) {
+        $it = $sel.Item($i)
+        if ($it.Class -eq $olMailClass) { [void]$list.Add((New-SingleItem $it $false)) }
+    }
+    return , $list
+}
+
+function Invoke-SingleMail([string]$Kind) {
+    $dry = $chkSinglePreview.Checked
+    $rules = Get-RulesForRun $dry
+    if ($null -eq $rules) { return }
+    $ctx = New-RunContext $dry
+    $ctx.SkipCategorized = -not $chkSingleRedo.Checked
+    $ctx.ShowSkipped = $true
+
+    # 套用方式
+    $sel = $cboSingleMode.SelectedIndex
+    if ($sel -eq 1) {
+        $p = Select-Folder ''
+        if (-not $p) { return }
+        $fr = [pscustomobject]$RuleDefaults
+        $fr.Name = '(手動指定目錄)'; $fr.TargetPath = $p; $fr.SaveAttachments = $true
+        $ctx.ForceRule = $fr
+    } elseif ($sel -ge 2) {
+        $id = $script:singleRuleIds[$sel - 2]
+        $fr = $rules | Where-Object { $_.Id -eq $id } | Select-Object -First 1
+        if (-not $fr) { Show-Msg '找不到這條規則（可能尚未儲存），請先儲存規則或改用「只預覽」。' 'Warning'; return }
+        $ctx.ForceRule = $fr
+    }
+
+    # 取得信件
+    $items = New-Object System.Collections.ArrayList
+    $opened = New-Object System.Collections.ArrayList
+    if ($Kind -eq 'Selection') {
+        $items = Get-OutlookSelection
+        if ($items.Count -eq 0) { Show-Msg '請先在 Outlook 選取（或開啟）要處理的信件。'; return }
+    } else {
+        $dlg = New-Object System.Windows.Forms.OpenFileDialog
+        $dlg.Filter = 'Outlook 信件 (*.msg)|*.msg'
+        $dlg.Multiselect = $true
+        $dlg.Title = '選擇要歸檔的信件檔'
+        if ($dlg.ShowDialog() -ne 'OK') { return }
+        $ns = Connect-Outlook
+        foreach ($f in $dlg.FileNames) {
+            try {
+                $m = $ns.OpenSharedItem($f)
+                [void]$opened.Add($m)
+                if ($m.Class -eq $olMailClass) { [void]$items.Add((New-SingleItem $m $true $f)) }
+                else { Show-Msg ("不是一般郵件，已略過：$f") 'Warning' }
+            } catch { Show-Msg ("無法開啟 $f`n`n" + $_.Exception.Message) 'Warning' }
+        }
+        if ($items.Count -eq 0) { return }
+    }
+
+    if (-not $dry) {
+        $how = $cboSingleMode.Text
+        if ($sel -eq 1) { $how = '存到 ' + $ctx.ForceRule.TargetPath }
+        if (-not (Confirm-Msg ("確定歸檔 {0} 封信件？`n套用方式：{1}" -f $items.Count, $how))) { foreach ($m in $opened) { try { $m.Close(1) } catch { } }; return }
+    }
+
+    $lvResult.Items.Clear()
+    $script:cancel = $false
+    Set-Running $true
+    try {
+        $progress.Value = 0
+        $progress.Maximum = [Math]::Max(1, $items.Count)
+        $n = 0
+        foreach ($x in $items) {
+            [System.Windows.Forms.Application]::DoEvents()
+            if ($script:cancel) { break }
+            $n++
+            $progress.Value = [Math]::Min($n, $progress.Maximum)
+            Set-Status ("單一信件：{0} / {1}" -f $n, $items.Count)
+            # .msg 檔不在 Outlook 信箱中，不加類別、不標已讀
+            Invoke-OneMail $x.Mail $x.SourceId $x.Label $rules $ctx (-not $x.FromFile)
+        }
+    } finally {
+        foreach ($m in $opened) { try { $m.Close(1) } catch { } }   # 1 = olDiscard
+        Set-Running $false
+        $msg = Complete-Run $ctx
+    }
     Show-Msg $msg
 }
 
@@ -1394,6 +1618,11 @@ $btnRun.Add_Click({ Invoke-Safe {
     if (-not (Confirm-Msg '確定開始歸檔？信件將依「已儲存」的規則存到本機目錄。建議先執行「預覽」確認結果。')) { return }
     Invoke-Processing $false
 } })
+$btnSelMail.Add_Click({ Invoke-Safe { Invoke-SingleMail 'Selection' } })
+$btnMsgFile.Add_Click({ Invoke-Safe { Invoke-SingleMail 'File' } })
+$cboSingleMode.Add_DropDown({ Invoke-Safe { Update-SingleModeCombo } })
+$chkSinglePreview.Add_CheckedChanged({ Invoke-Safe { Update-SingleModeCombo } })
+$tabs.Add_SelectedIndexChanged({ if ($tabs.SelectedTab -eq $tabRun) { Invoke-Safe { Update-SingleModeCombo } } })
 $btnStop.Add_Click({ $script:cancel = $true; Set-Status '正在停止…' })
 $btnOpenLog.Add_Click({ Invoke-Safe {
     if (-not (Test-Path -LiteralPath $LogDir)) { [void][System.IO.Directory]::CreateDirectory($LogDir) }
@@ -1483,6 +1712,39 @@ $btnRestore.Add_Click({ Invoke-Safe {
 } })
 
 # ===========================================================================
+# 不開管理介面：直接處理 Outlook 中選取的信件（ArchiveSelected.bat）
+# ===========================================================================
+if ($script:headless) {
+    try {
+        $rules = Get-RulesForRun ([bool]$Preview)
+        if ($null -ne $rules) {
+            $items = Get-OutlookSelection
+            if ($items.Count -eq 0) {
+                Show-Msg '請先在 Outlook 選取（或開啟）要歸檔的信件，再執行一次。'
+            } else {
+                $ctx = New-RunContext ([bool]$Preview)
+                $ctx.ShowSkipped = $true
+                if ($Force) { $ctx.SkipCategorized = $false }
+                foreach ($x in $items) { Invoke-OneMail $x.Mail $x.SourceId $x.Label $rules $ctx $true }
+                $msg = Complete-Run $ctx
+                $lines = @($script:headlessResults)
+                $detail = ($lines | Select-Object -First 15) -join "`n"
+                if ($lines.Count -gt 15) { $detail += "`n…（其餘 $($lines.Count - 15) 筆請見 logs 資料夾）" }
+                $icon = 'Information'
+                if ($ctx.Stat.Error -gt 0) { $icon = 'Warning' }
+                Show-Msg ($msg + "`n`n" + $detail) $icon
+            }
+        }
+    } catch {
+        Show-Msg ('發生錯誤：' + $_.Exception.Message) 'Error'
+    } finally {
+        Close-Office
+    }
+    $form.Dispose()
+    exit
+}
+
+# ===========================================================================
 # 啟動與關閉
 # ===========================================================================
 $form.Add_Shown({
@@ -1490,6 +1752,7 @@ $form.Add_Shown({
     Update-SourceList
     Update-RuleList 0
     Update-HistoryList
+    Update-SingleModeCombo
     Set-Dirty $false
     try { Update-FolderCombo }
     catch { Set-Status '無法連線 Outlook'; Show-Msg ("無法讀取 Outlook 資料夾，請確認 Outlook 已安裝並設定好信箱。`n`n" + $_.Exception.Message) 'Warning' }
