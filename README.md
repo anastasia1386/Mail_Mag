@@ -20,6 +20,8 @@ Outlook 信件自動分類歸檔工具，**免安裝、不需管理者權限**�
 | `MailSorter.ps1` | 主程式（管理介面＋處理引擎） |
 | `ArchiveSelected.bat` | 不開管理介面，直接依已儲存的規則歸檔 Outlook 中選取的信件 |
 | `CheckEnv.bat` / `CheckEnv.ps1` | 環境檢查（建議第一次先執行） |
+| `docs\MailSorter_Specification.docx` | 程式規格書 |
+| `docs\MailSorter_User_Manual.docx` | 使用者手冊（操作說明、範例、常見問題） |
 | `config.json` | 第一次執行後自動產生：資料來源、規則、選項 |
 | `history\rules_*.json` | 規則修改紀錄，每次儲存新增一個檔案，不會覆寫 |
 | `logs\處理紀錄_yyyyMMdd.csv` | 每次正式歸檔的處理結果 |

@@ -37,7 +37,7 @@ Add-Type -AssemblyName System.Drawing
 [System.Windows.Forms.Application]::EnableVisualStyles()
 
 $AppName    = 'MailSorter 信件歸檔工具'
-$AppVersion = '1.0.0'
+$AppVersion = '1.1.0'
 $BaseDir    = $PSScriptRoot
 if (-not $BaseDir) { $BaseDir = Split-Path -Parent $MyInvocation.MyCommand.Path }
 $ConfigPath = Join-Path $BaseDir 'config.json'
