@@ -97,7 +97,8 @@ Outlook 信件自動分類歸檔工具，**免安裝、不需管理者權限**�
 
 | 狀況 | 原因與處理 |
 |---|---|
-| 雙擊 bat 沒有反應，或顯示「受限語言模式」 | GCB／AppLocker 將 PowerShell 設成 ConstrainedLanguage，請洽資訊單位將本程式加入允許清單 |
+| 雙擊 bat 後黑色視窗停住並顯示錯誤 | 請截圖。詳細內容另存於 `logs\startup_error.log`；也可執行 `CheckEnv.bat` 看「快速檢查」結果 |
+| 顯示「受限語言模式」 | GCB／AppLocker 將 PowerShell 設成 ConstrainedLanguage，請洽資訊單位將本程式加入允許清單 |
 | 顯示「無法載入檔案…未經數位簽署」 | 檔案被標記為來自網際網路：在 `.ps1` 檔案「內容」勾選「解除封鎖」。如果是群組原則強制 AllSigned，請洽資訊單位簽章 |
 | Outlook 跳出「有程式正在嘗試存取電子郵件地址」 | Outlook 的程式存取安全性設定，可選擇允許一段時間，或請資訊單位調整 |
 | PDF 轉檔失敗 | 確認 Word 可以正常開啟；遇到加密或受 IRM 保護的信件時會記錄錯誤並略過 |

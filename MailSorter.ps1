@@ -29,15 +29,33 @@ if ($ExecutionContext.SessionState.LanguageMode -ne 'FullLanguage') {
     exit 1
 }
 
+# 啟動階段若發生未處理的錯誤：顯示訊息、寫入 logs\startup_error.log，並以代碼 1 結束（啟動檔會暫停讓使用者看到訊息）
+trap {
+    $err = $_
+    $text = "MailSorter 發生錯誤，無法繼續執行：`r`n`r`n" + $err.Exception.Message + "`r`n`r`n" + $err.InvocationInfo.PositionMessage
+    Write-Host ''
+    Write-Host $text -ForegroundColor Red
+    try {
+        $logDirTrap = Join-Path $PSScriptRoot 'logs'
+        if (-not (Test-Path -LiteralPath $logDirTrap)) { [void][System.IO.Directory]::CreateDirectory($logDirTrap) }
+        $line = "[{0}] PowerShell {1}`r`n{2}`r`n{3}`r`n`r`n" -f (Get-Date -Format 'yyyy-MM-dd HH:mm:ss'), $PSVersionTable.PSVersion, $err.Exception.ToString(), $err.InvocationInfo.PositionMessage
+        [System.IO.File]::AppendAllText((Join-Path $logDirTrap 'startup_error.log'), $line, (New-Object System.Text.UTF8Encoding($true)))
+    } catch { }
+    try { [void][System.Windows.Forms.MessageBox]::Show($text, 'MailSorter', 'OK', 'Error') } catch { }
+    exit 1
+}
+
 Set-StrictMode -Off
 $ErrorActionPreference = 'Stop'
+try { $Host.UI.RawUI.WindowTitle = 'MailSorter（請勿關閉此視窗）' } catch { }
+Write-Host 'MailSorter 啟動中…（此視窗會在程式開啟後自動縮到工作列，使用期間請勿關閉）'
 
 Add-Type -AssemblyName System.Windows.Forms
 Add-Type -AssemblyName System.Drawing
 [System.Windows.Forms.Application]::EnableVisualStyles()
 
 $AppName    = 'MailSorter 信件歸檔工具'
-$AppVersion = '1.1.0'
+$AppVersion = '1.1.1'
 $BaseDir    = $PSScriptRoot
 if (-not $BaseDir) { $BaseDir = Split-Path -Parent $MyInvocation.MyCommand.Path }
 $ConfigPath = Join-Path $BaseDir 'config.json'
@@ -1747,7 +1765,22 @@ if ($script:headless) {
 # ===========================================================================
 # 啟動與關閉
 # ===========================================================================
+# 程式視窗開啟後，把黑色主控台視窗縮到工作列（失敗時不影響使用）
+function Hide-ConsoleWindow {
+    try {
+        if (-not ('MailSorterNative.ConsoleWin' -as [type])) {
+            Add-Type -Namespace MailSorterNative -Name ConsoleWin -MemberDefinition @'
+[DllImport("kernel32.dll")] public static extern IntPtr GetConsoleWindow();
+[DllImport("user32.dll")] public static extern bool ShowWindow(IntPtr hWnd, int nCmdShow);
+'@
+        }
+        [void][MailSorterNative.ConsoleWin]::ShowWindow([MailSorterNative.ConsoleWin]::GetConsoleWindow(), 6)   # 6 = 最小化
+    } catch { }
+}
+
 $form.Add_Shown({
+    Hide-ConsoleWindow
+    $form.Activate()
     Show-Options
     Update-SourceList
     Update-RuleList 0
