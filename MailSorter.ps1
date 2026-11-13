@@ -55,7 +55,7 @@ Add-Type -AssemblyName System.Drawing
 [System.Windows.Forms.Application]::EnableVisualStyles()
 
 $AppName    = 'MailSorter 信件歸檔工具'
-$AppVersion = '1.1.1'
+$AppVersion = '1.1.2'
 $BaseDir    = $PSScriptRoot
 if (-not $BaseDir) { $BaseDir = Split-Path -Parent $MyInvocation.MyCommand.Path }
 $ConfigPath = Join-Path $BaseDir 'config.json'
@@ -230,22 +230,23 @@ function Get-SafeName([string]$Text, [int]$MaxLength = 80) {
 # 展開路徑/檔名範本
 function Expand-Template([string]$Template, $Info, [string]$RuleName, [switch]$IsPath) {
     $t = [datetime]$Info.Received
-    $map = [ordered]@{
-        '{寄件者信箱}' = $Info.SenderEmail
-        '{寄件網域}'   = $Info.Domain
-        '{寄件者}'     = $Info.SenderName
-        '{主旨}'       = $Info.Subject
-        '{規則}'       = $RuleName
-        '{yyyy}'       = $t.ToString('yyyy')
-        '{MM}'         = $t.ToString('MM')
-        '{dd}'         = $t.ToString('dd')
-        '{HH}'         = $t.ToString('HH')
-        '{mm}'         = $t.ToString('mm')
-    }
+    # 注意：不可用雜湊表，PowerShell 的雜湊表鍵值不分大小寫，{MM}(月) 與 {mm}(分) 會被視為重複
+    $pairs = @(
+        @('{寄件者信箱}', $Info.SenderEmail),
+        @('{寄件網域}',   $Info.Domain),
+        @('{寄件者}',     $Info.SenderName),
+        @('{主旨}',       $Info.Subject),
+        @('{規則}',       $RuleName),
+        @('{yyyy}',       $t.ToString('yyyy')),
+        @('{MM}',         $t.ToString('MM')),
+        @('{dd}',         $t.ToString('dd')),
+        @('{HH}',         $t.ToString('HH')),
+        @('{mm}',         $t.ToString('mm'))
+    )
     $result = [string]$Template
-    foreach ($k in $map.Keys) {
+    foreach ($pair in $pairs) {
         # String.Replace 區分大小寫，{MM}(月) 與 {mm}(分) 不會混淆
-        $result = $result.Replace($k, (Get-SafeName ([string]$map[$k])))
+        $result = $result.Replace([string]$pair[0], (Get-SafeName ([string]$pair[1])))
     }
     if ($IsPath) {
         $parts = $result -split '\\'
