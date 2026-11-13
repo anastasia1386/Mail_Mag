@@ -55,7 +55,7 @@ Add-Type -AssemblyName System.Drawing
 [System.Windows.Forms.Application]::EnableVisualStyles()
 
 $AppName    = 'MailSorter 信件歸檔工具'
-$AppVersion = '1.1.2'
+$AppVersion = '1.1.3'
 $BaseDir    = $PSScriptRoot
 if (-not $BaseDir) { $BaseDir = Split-Path -Parent $MyInvocation.MyCommand.Path }
 $ConfigPath = Join-Path $BaseDir 'config.json'
@@ -1341,7 +1341,26 @@ function New-RunContext([bool]$DryRun) {
         SkipCategorized = [bool]$script:config.Options.SkipCategorized
         ShowSkipped     = $false     # 是否在結果清單列出「已歸檔而略過」的信件
         ForceRule       = $null      # 指定套用的規則（不比對條件）
+        OomDenied       = $false     # 是否遇到 Outlook 程式設計存取安全性拒絕（E_ABORT）
     }
+}
+
+# Outlook 程式設計存取安全性（Object Model Guard）設為「自動拒絕」時，
+# 另存信件、讀取寄件者地址等受保護的操作會回傳 E_ABORT (0x80004004)
+$OomDeniedHint = 'Outlook 安全性原則拒絕程式另存信件。這是機關對 Outlook「程式設計存取」的管控（常見於 GCB），本程式不會繞過；請執行 CheckEnv.bat 確認，並洽資訊單位。'
+
+function Get-ErrorText($ErrorRecord, $Ctx) {
+    $ex = $ErrorRecord.Exception
+    $msg = $ex.Message
+    $denied = $false
+    for ($e = $ex; $e; $e = $e.InnerException) {
+        if ($e.HResult -eq -2147467260 -or $e.Message -match '0x80004004') { $denied = $true }
+    }
+    if ($denied) {
+        if ($Ctx) { $Ctx.OomDenied = $true }
+        return "$msg  →  $OomDeniedHint"
+    }
+    return $msg
 }
 
 # 處理一封信件（資料夾批次與單一信件共用）
@@ -1403,15 +1422,17 @@ function Invoke-OneMail($Mail, [string]$SourceId, [string]$FolderLabel, $Rules, 
             } catch {
                 $state = '錯誤'
                 if ($_.Exception.Message -like '目錄不存在*') { $state = '略過'; $Ctx.Stat.Skip++ } else { $Ctx.Stat.Error++ }
-                Add-Result $state $info $r.Name $_.Exception.Message
-                [void]$Ctx.LogRows.Add((New-LogRow $Ctx.RunTime $Ctx.Mode $FolderLabel $info $r.Name $dir $state $_.Exception.Message))
+                $errText = Get-ErrorText $_ $Ctx
+                Add-Result $state $info $r.Name $errText
+                [void]$Ctx.LogRows.Add((New-LogRow $Ctx.RunTime $Ctx.Mode $FolderLabel $info $r.Name $dir $state $errText))
             }
         }
         if ($anyOk -and $AllowUpdate) { try { Complete-Mail $info } catch { } }
     } catch {
         $Ctx.Stat.Error++
-        Add-Result '錯誤' $info '' $_.Exception.Message
-        if ($info) { [void]$Ctx.LogRows.Add((New-LogRow $Ctx.RunTime $Ctx.Mode $FolderLabel $info '' '' '錯誤' $_.Exception.Message)) }
+        $errText = Get-ErrorText $_ $Ctx
+        Add-Result '錯誤' $info '' $errText
+        if ($info) { [void]$Ctx.LogRows.Add((New-LogRow $Ctx.RunTime $Ctx.Mode $FolderLabel $info '' '' '錯誤' $errText)) }
     }
 }
 
@@ -1430,6 +1451,9 @@ function Complete-Run($Ctx) {
     $msg = "{0}完成：共檢查 {1} 封；{2} {3} 筆、略過 {4} 封、未符合 {5} 封、錯誤 {6} 筆" -f $Ctx.Mode, $st.Total, $verb, $st.Done, $st.Skip, $st.NoMatch, $st.Error
     if ($script:cancel) { $msg = '（已手動停止）' + $msg }
     Set-Status $msg
+    if ($Ctx.OomDenied) {
+        $msg += "`n`n【無法存檔的原因】`n" + $OomDeniedHint + "`n`n說明：Outlook 的「程式設計存取安全性」被設定為自動拒絕時，任何外部程式都無法另存信件。可請資訊單位評估將此設定改為「提示使用者」（每次由您按允許），或核准本程式使用。"
+    }
     return $msg
 }
 
